@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+@theme {
+  /* BuildAtScale palette, taken from buildatscale.com: black canvas, warm cream surface, electric-blue actions and a
+     cyan highlight. brand-600 is the site's button blue (#2584fc). */
+  --color-brand-50: #eef6ff;
+  --color-brand-100: #d9eaff;
+  --color-brand-200: #bcdbff;
+  --color-brand-300: #8ec3fe;
+  --color-brand-400: #5aa5fd;
+  --color-brand-500: #3a93fc;
+  --color-brand-600: #2584fc;
+  --color-brand-700: #156ce0;
+  --color-brand-800: #1757b4;
+  --color-brand-900: #18488d;
+  --color-accent: #24ffff;
+  --color-cream: #fff8ef;
+  --color-cream-200: #f3e9dc;
+  --color-ink: #0b0b0b;
+  --color-ink-800: #18181b;
+  --color-ink-700: #27272a;
+  --font-sans: var(--font-lato), "Lato", ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-titillium), "Titillium Web", ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  @apply bg-cream text-slate-800 antialiased;
+}
+
+h1,
+h2 {
+  @apply font-display;
+}
+
+.input {
+  @apply w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100;
+}
+
+.label {
+  @apply mb-1 block text-xs font-medium text-slate-600;
+}

@@ -1,0 +1,345 @@
+// BuildAtScaleOS (formerly Ops Tracker) — standalone data model. Split out of the OpsCentral platform on 2026-10-29: only the tables the Ops
+// Tracker needs (people and access, clients, projects, tasks and their history). No billing, payroll, HR or CRM.
+// 2026-10-29: project type/value, project finance entries and workstreams brought back from the platform for the
+// Harmony-style Projects workspace (same shapes as the platform, so data can move between them).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Access control ----------
+
+model Role {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  permissions String[]
+  isSystem    Boolean  @default(false)
+  users       User[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model User {
+  id           String      @id @default(cuid())
+  email        String      @unique
+  passwordHash String
+  name         String
+  empCode      String?     @unique
+  designation  String?
+  phone        String?
+  joinDate     DateTime?   @db.Date
+  status       UserStatus  @default(ACTIVE)
+  roleId       String
+  role         Role        @relation(fields: [roleId], references: [id])
+  departmentId String?
+  department   Department? @relation("DepartmentMembers", fields: [departmentId], references: [id], onDelete: SetNull)
+  managerId    String?
+  manager      User?       @relation("ReportingManager", fields: [managerId], references: [id], onDelete: SetNull)
+  reportees    User[]      @relation("ReportingManager")
+
+  sessions       Session[]
+  projectMembers ProjectMember[]
+  tasksAssigned  Task[]                @relation("TaskAssignee")
+  tasksCreated   Task[]                @relation("TaskAssigner")
+  tasksToReview  Task[]                @relation("TaskReviewer")
+  blockerTypes   BlockerType[]         @relation("BlockerTypeCreator")
+  financeEntries ProjectFinanceEntry[]
+  workstreams    WorkstreamMember[]
+  taskEvents     TaskEvent[]
+  timeEntries    TimeEntry[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum UserStatus {
+  ACTIVE
+  EXITED
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ---------- Organisation ----------
+
+// Teams. "My Team" on My Tasks means the same department.
+model Department {
+  id        String     @id @default(cuid())
+  name      String     @unique
+  members   User[]     @relation("DepartmentMembers")
+  taskTypes TaskType[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+}
+
+model TaskType {
+  id           String     @id @default(cuid())
+  name         String
+  departmentId String
+  department   Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  tasks        Task[]
+
+  @@unique([departmentId, name])
+}
+
+// ---------- Clients & projects ----------
+
+model Client {
+  id          String    @id @default(cuid())
+  name        String    @unique
+  contactName String?
+  email       String?
+  phone       String?
+  notes       String?
+  projects    Project[]
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+// Harmony's "Project Type". RETAINER: value is the monthly fee. PROJECT: total contract value. PAY_AS_YOU_GO: value is an
+// estimate entered on the form (the platform's bill rate is not part of BuildAtScaleOS).
+enum BillingType {
+  RETAINER
+  PROJECT
+  PAY_AS_YOU_GO
+}
+
+enum ProjectStatus {
+  ACTIVE
+  ON_HOLD
+  COMPLETED
+  CANCELLED
+}
+
+model Project {
+  id          String        @id @default(cuid())
+  name        String
+  // Project ID (PRJ-001…). Editable on the project form; blank on create = next number from project_code_seq.
+  code        String?       @unique @default(dbgenerated("('PRJ-'::text || lpad((nextval('project_code_seq'::regclass))::text, 3, '0'::text))"))
+  clientId    String
+  client      Client        @relation(fields: [clientId], references: [id])
+  startDate   DateTime
+  endDate     DateTime?
+  status      ProjectStatus @default(ACTIVE)
+  description String?
+  billingType BillingType   @default(PROJECT)
+  isBillable  Boolean       @default(true)
+  // Public projects can be opened by everyone who signs in, not only their members (A).
+  isPublic    Boolean       @default(false)
+  value       Decimal       @default(0) @db.Decimal(14, 2)
+
+  members        ProjectMember[]
+  tasks          Task[]
+  timeEntries    TimeEntry[]
+  financeEntries ProjectFinanceEntry[]
+  workstreams    Workstream[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([clientId])
+}
+
+enum ProjectRole {
+  MEMBER
+  MANAGER
+}
+
+model ProjectMember {
+  id        String      @id @default(cuid())
+  projectId String
+  project   Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      ProjectRole @default(MEMBER)
+
+  @@unique([projectId, userId])
+}
+
+enum FinanceKind {
+  OTHER_INCOME
+  DIRECT_EXPENSE
+  ADHOC_EXPENSE
+}
+
+// Other income and expenses booked against a project (feeds the KPI strip and the Expenses tab).
+model ProjectFinanceEntry {
+  id          String      @id @default(cuid())
+  projectId   String
+  project     Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  kind        FinanceKind
+  date        DateTime    @db.Date
+  amount      Decimal     @db.Decimal(14, 2)
+  description String
+  createdById String
+  createdBy   User        @relation(fields: [createdById], references: [id])
+  createdAt   DateTime    @default(now())
+
+  @@index([projectId, date])
+}
+
+// Areas of a project such as SEO or Paid Media. Deleting one keeps its tasks on the project.
+model Workstream {
+  id          String             @id @default(cuid())
+  projectId   String
+  project     Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  members     WorkstreamMember[]
+  tasks       Task[]
+  createdAt   DateTime           @default(now())
+
+  @@unique([projectId, name])
+}
+
+model WorkstreamMember {
+  workstreamId String
+  workstream   Workstream @relation(fields: [workstreamId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([workstreamId, userId])
+}
+
+// ---------- Tasks & time ----------
+
+enum TaskStatus {
+  PIPELINE
+  IN_PROGRESS
+  PENDING_APPROVAL
+  COMPLETED
+  ON_HOLD
+  REJECTED
+  DECLINED
+}
+
+enum Priority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+model Task {
+  id             String       @id @default(cuid())
+  // Code comes from a database sequence so every way of creating a task gets one.
+  code           String       @unique @default(dbgenerated("('TSK-'::text || lpad((nextval('task_code_seq'::regclass))::text, 3, '0'::text))"))
+  title          String
+  description    String?
+  projectId      String
+  project        Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  taskTypeId     String?
+  taskType       TaskType?    @relation(fields: [taskTypeId], references: [id], onDelete: SetNull)
+  workstreamId   String?
+  workstream     Workstream?  @relation(fields: [workstreamId], references: [id], onDelete: SetNull)
+  assigneeId     String
+  assignee       User         @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  assignedById   String
+  assignedBy     User         @relation("TaskAssigner", fields: [assignedById], references: [id])
+  status         TaskStatus   @default(PIPELINE)
+  priority       Priority     @default(NORMAL)
+  assignedDate   DateTime     @default(now())
+  deadline       DateTime?
+  completedDate  DateTime?
+  startedAt      DateTime? // running timer while In Progress; stints are saved as TimeEntry rows
+  estimatedHours Decimal?     @db.Decimal(8, 2)
+  reviewerId     String?
+  reviewer       User?        @relation("TaskReviewer", fields: [reviewerId], references: [id], onDelete: SetNull)
+  startDate      DateTime? // first time the task went In Progress; unlike startedAt it is never cleared
+  underReviewAt  DateTime? // when the task last entered Pending Approval
+  reviewCount    Int          @default(0) // approvals given
+  revisionCount  Int          @default(0) // times a reviewer sent it back (Reject)
+  reopenCount    Int          @default(0) // times a completed task was reopened (Revert)
+  blockerTypeId  String?
+  blockerType    BlockerType? @relation(fields: [blockerTypeId], references: [id], onDelete: SetNull)
+  blockerNote    String?
+  clientAction   String? // what the client must do to unblock (feeds the Client RPA "Action" table)
+  notes          String? // the sheet's "Notes / Remarks": running remarks on the work, unlike the fixed description
+  timeEntries    TimeEntry[]
+  events         TaskEvent[]
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([projectId])
+  @@index([assigneeId, status])
+}
+
+// Why a task is blocked. A shared list: the initial reasons are inserted by the first migration, and anyone blocking
+// a task can add a new reason, which everyone can then reuse.
+model BlockerType {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  createdById String?
+  createdBy   User?    @relation("BlockerTypeCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  tasks       Task[]
+  createdAt   DateTime @default(now())
+}
+
+enum TaskEventKind {
+  STATUS
+  PRIORITY
+  REVIEWER
+  BLOCKER
+}
+
+// History of every change to a task, written by the task workflow. It is the audit trail and the source for review
+// wait times.
+model TaskEvent {
+  id         String        @id @default(cuid())
+  taskId     String
+  task       Task          @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User          @relation(fields: [userId], references: [id])
+  kind       TaskEventKind
+  action     String? // workflow action (start, complete, approve, reject, revert, hold, resume, deny, reassign)
+  fromStatus TaskStatus?
+  toStatus   TaskStatus?
+  note       String?
+  createdAt  DateTime      @default(now())
+
+  @@index([taskId, createdAt])
+}
+
+// Hours a user spent on a task (timer stints and manual entries).
+model TimeEntry {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  taskId    String?
+  task      Task?    @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  date      DateTime @db.Date
+  hours     Decimal  @db.Decimal(6, 2)
+  note      String?
+  createdAt DateTime @default(now())
+
+  @@index([projectId, date])
+  @@index([userId, date])
+}
+
+// ---------- Settings (singleton row id = "org") ----------
+
+model OrgSettings {
+  id                   String   @id @default("org")
+  name                 String   @default("BuildAtScaleOS")
+  // Task completion rules (same defaults as the platform: approval on, auto-approve tasks up to 2 h).
+  taskApprovalRequired Boolean  @default(true)
+  autoApproveTasks     Boolean  @default(true)
+  autoApproveMaxHours  Decimal  @default(2) @db.Decimal(5, 2)
+  updatedAt            DateTime @updatedAt
+}

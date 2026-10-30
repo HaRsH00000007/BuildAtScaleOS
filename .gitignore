@@ -1,0 +1,115 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+credentials*.json
+service-account*.json
+*-credentials.json
+firebase-adminsdk*.json
+secrets/
+.secrets/
+*.secret
+.npmrc
+.netrc
+
+# Cookies, tokens, sessions
+cookies*.json
+*.cookies
+cookies.txt
+tokens*.json
+*.token
+storage-state*.json
+storageState*.json
+auth-state*.json
+.auth/
+sessions/
+session-data/
+*.session
+*.har
+
+# Browser profiles and automation data
+chrome-profile*/
+browser-profile*/
+user-data-dir*/
+.playwright/
+playwright/.auth/
+playwright-report/
+test-results/
+.puppeteer*/
+
+# Captures and evidence (raw, may contain personal data)
+captures/
+evidence/
+screenshots/
+recordings/
+*.trace.zip
+*.cdp.json
+tmp/
+temp/
+.tmp/
+*.tmp
+
+# Dependencies
+node_modules/
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/releases
+bower_components/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+.nuxt/
+.output/
+.svelte-kit/
+.vercel/
+.netlify/
+.turbo/
+.parcel-cache/
+.vite/
+coverage/
+*.tsbuildinfo
+storybook-static/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local databases
+*.sqlite
+*.sqlite3
+*.db
+data/local/
+
+# Editor and OS
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local PostgreSQL cluster
+.pgdata/
+
+# Files module storage
+uploads/
