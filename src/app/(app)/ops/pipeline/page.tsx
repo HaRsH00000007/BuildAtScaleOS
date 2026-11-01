@@ -7,41 +7,61 @@ import { listBlockerTypes } from "@/lib/blocker-types";
 import { db } from "@/lib/db";
 import { formatDate, formatHours, formatPct, monthLabel } from "@/lib/format";
 import {
+  commitmentVarianceDays,
+  dateDay,
+  dayIn,
   formatDayIn,
   formatDuration,
+  formatHoursDecimal,
+  formatTimeSlot,
+  formatVariance,
+  netTurnaroundHours,
+  sheetSla,
+  totalReviewWaitHours,
+  TIME_SLOTS,
   PIPELINE_STATUS_LABEL,
   PIPELINE_STATUSES,
   PRIORITIES,
   PRIORITY_LABEL,
   pipelineSummary,
-  reviewWait,
   SLA_LABEL,
-  slaStatus,
   taskMonth,
   turnaroundHours,
   urgency,
-  urgencyColumn,
   type Priority,
   type Sla,
 } from "@/lib/ops-metrics";
 import { monthOptions, PIPELINE_SORTS, pipelineWhere, readPipelineFilters } from "@/lib/ops-pipeline";
 import { TIME_ZONE } from "@/lib/org";
 import { isTaskAssigner } from "@/lib/task-access";
-import { allowedActions, type TaskAction, type TaskStatus } from "@/lib/tasks";
+import { actionTarget, allowedActions, type TaskAction, type TaskStatus } from "@/lib/tasks";
 import { readParams, withParams, type SearchParams } from "@/lib/url";
-import { blockTask, moveTask, setPriority, setReviewer, updateBlocker, updateNotes } from "./actions";
-import { AutoSubmitSelect, BlockerForm, NotesForm } from "./pipeline-forms";
+import { blockTask, moveTask, setCommitment, setDeadlineTime, setFirstSubmission, setPreviewLink, setTaskDates, setPriority, setReviewer, updateBlocker, updateNotes } from "./actions";
+import { AutoSubmitDate, AutoSubmitSelect, BlockerForm, NotesCell, NotesForm, PreviewLinkCell } from "./pipeline-forms";
 
 // Ops Tracker › Task Pipeline: every task in the company in one ledger (plan v2: open to everyone with ops.view).
 // Statuses use the sheet's names; changes run through the same workflow as My Tasks.
 
-type Tone = "slate" | "brand" | "green" | "amber" | "red" | "blue";
-const STATUS_TONE: Record<TaskStatus, Tone> = { PIPELINE: "slate", IN_PROGRESS: "blue", PENDING_APPROVAL: "brand", COMPLETED: "green", ON_HOLD: "red", REJECTED: "amber", DECLINED: "slate" };
-const PRIORITY_TONE: Record<Priority, Tone> = { URGENT: "red", HIGH: "amber", NORMAL: "slate", LOW: "slate" };
+// Sheet-style coloured chips for the Status and Priority columns (dropdown and read-only alike).
+const STATUS_PILL: Record<TaskStatus, string> = {
+  PIPELINE: "bg-red-100 text-red-700",
+  IN_PROGRESS: "bg-blue-100 text-blue-700",
+  PENDING_APPROVAL: "bg-violet-100 text-violet-700",
+  COMPLETED: "bg-green-100 text-green-800",
+  ON_HOLD: "bg-red-600 text-white",
+  REJECTED: "bg-orange-100 text-orange-800",
+  DECLINED: "bg-slate-200 text-slate-700",
+};
+const PRIORITY_PILL: Record<Priority, string> = { URGENT: "bg-red-600 text-white", HIGH: "bg-red-100 text-red-700", NORMAL: "bg-amber-100 text-amber-800", LOW: "bg-blue-100 text-blue-700" };
+const pill = "inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium";
+// The sheet's red KPI columns: calculated, never typed in, so they get their own tint.
+const kpiTh = "bg-red-50 text-red-800";
+const kpiTd = "bg-red-50/40 whitespace-nowrap text-slate-700 tabular-nums";
+const SLA_PILL: Partial<Record<Sla, string>> = { ON_TIME: "bg-green-100 text-green-800", OVERDUE: "bg-red-100 text-red-700", LATE: "bg-orange-100 text-orange-800" };
+const SHEET_SLA_LABEL: Record<Sla, string> = { ...SLA_LABEL, ON_TIME: "On Time", LATE: "Late Completion" };
 const ACTION_LABEL: Record<TaskAction, string> = { start: "Start", deny: "Decline", hold: "Block", resume: "Resume", complete: "Complete", approve: "Approve", reject: "Return", revert: "Reopen" };
 const ACTION_HISTORY: Record<string, string> = { start: "Started", deny: "Declined", hold: "Blocked", resume: "Resumed", complete: "Completed", approve: "Approved", reject: "Returned for changes", revert: "Reopened", reassign: "Reassigned" };
 const PRIMARY: TaskAction[] = ["start", "complete", "approve"];
-const SLA_TONE: Partial<Record<Sla, Tone>> = { ON_TIME: "green", LATE: "amber", OVERDUE: "red" };
 const selectClass = "rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-sm";
 // Table cells. Task ID and Task Name stay pinned while the sheet's other columns scroll sideways.
 // The header row is pinned too; the inset shadow stands in for its bottom border, which collapsed borders don't keep while sticky.
@@ -56,6 +76,34 @@ const taskInclude = {
   reviewer: { select: { id: true, name: true } },
   blockerType: { select: { id: true, name: true } },
 } as const;
+
+/** Status chip; a dropdown of the statuses this user may move the task to next. Blocked opens the reason form first. */
+function StatusSelect({ id, code, status, actions, blockHref }: { id: string; code: string; status: TaskStatus; actions: TaskAction[]; blockHref: string }) {
+  if (!actions.length) return <span className={cx(pill, STATUS_PILL[status])}>{PIPELINE_STATUS_LABEL[status]}</span>;
+  const tones: Record<string, string> = { "": STATUS_PILL[status] };
+  for (const a of actions) tones[a] = STATUS_PILL[actionTarget(a)];
+  return (
+    <AutoSubmitSelect
+      key={status} // fresh dropdown once the move lands
+      action={moveTask}
+      hidden={{ id }}
+      name="action"
+      value=""
+      label={`Status of ${code}`}
+      options={[{ value: "", label: PIPELINE_STATUS_LABEL[status] }, ...actions.map((a) => ({ value: a, label: PIPELINE_STATUS_LABEL[actionTarget(a)] }))]}
+      tones={tones}
+      links={actions.includes("hold") ? { hold: blockHref } : undefined}
+    />
+  );
+}
+
+// The sheet's grey time chips: half-hour slots, or blank.
+const TIME_OPTIONS = [{ value: "", label: "—" }, ...TIME_SLOTS.map((s) => ({ value: s, label: formatTimeSlot(s) }))];
+const TIME_TONES = Object.fromEntries(TIME_OPTIONS.map((o) => [o.value, "bg-slate-100 text-slate-700"]));
+
+function TimeSelect({ action, id, name, value, label }: { action: (formData: FormData) => Promise<void>; id: string; name: string; value: string | null; label: string }) {
+  return <AutoSubmitSelect action={action} hidden={{ id }} name={name} value={value ?? ""} label={label} options={TIME_OPTIONS} tones={TIME_TONES} />;
+}
 
 async function rightsFor(user: CurrentUser, t: { status: TaskStatus; assigneeId: string; assignedById: string; projectId: string }) {
   const ctx = { isAssignee: t.assigneeId === user.id, isAssigner: await isTaskAssigner(user, t) };
@@ -74,7 +122,11 @@ export default async function TaskPipelinePage({ searchParams }: { searchParams:
       where: pipelineWhere(f),
       orderBy: PIPELINE_SORTS[f.sort]!.orderBy,
       // Latest approve/return, for the Review Wait Time column.
-      include: { ...taskInclude, events: { where: { action: { in: ["approve", "reject"] } }, orderBy: { createdAt: "desc" }, take: 1, select: { createdAt: true } } },
+      // Moves into and out of review, for the Review Wait Time column.
+      include: {
+        ...taskInclude,
+        events: { where: { kind: "STATUS", OR: [{ toStatus: "PENDING_APPROVAL" }, { fromStatus: "PENDING_APPROVAL" }] }, orderBy: { createdAt: "asc" }, select: { createdAt: true, fromStatus: true, toStatus: true } },
+      },
     }),
     db.task.findMany({ where: pipelineWhere(f, { withStatus: false }), select: { status: true, deadline: true, completedDate: true, assignedDate: true } }),
     db.client.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }),
@@ -203,36 +255,40 @@ export default async function TaskPipelinePage({ searchParams }: { searchParams:
                 <th className={th}>Client</th>
                 <th className={th}>{sortHeader("assignee", "Assignee")}</th>
                 <th className={th}>{sortHeader("priority", "Priority")}</th>
-                <th className={th}>Start Date</th>
-                <th className={th}>{sortHeader("due", "Due Date")}</th>
-                <th className={th}>Completed Date</th>
                 <th className={th}>{sortHeader("status", "Status")}</th>
-                <th className={th} title="From the first start (else assignment) to completion, hours:minutes">
-                  Task Completion Time
+                <th className={th}>Assigned Date</th>
+                <th className={th}>{sortHeader("due", "Assigned Deadline (date)")}</th>
+                <th className={th}>Assigned Deadline (time)</th>
+                <th className={th}>Editor Committed (date)</th>
+                <th className={th}>Editor Committed (time)</th>
+                <th className={th}>Preview Link</th>
+                <th className={th} title="Filled in the first time the task is completed; can be corrected">
+                  1st Submission Date
                 </th>
+                <th className={th}>1st Submission Time</th>
                 <th className={th}>Notes / Remarks</th>
-                <th className={th}>SLA Delivery Status</th>
-                <th className={th} title="The month the task is due (assigned month if it has no due date)">
-                  Month
+                <th className={cx(th, kpiTh)} title="Calculated: 1st Submission Date & Time − Assigned Date & Time">
+                  Net Turnaround (Hrs)
                 </th>
-                <th className={th}>Urgency</th>
-                <th className={th}>Blocker Category</th>
-                <th className={th}>Reviewer</th>
-                <th className={th} title="Times a reviewer returned the task">
+                <th className={cx(th, kpiTh)} title="Calculated: total time spent Under review">
+                  Review Wait Time (Hrs)
+                </th>
+                <th className={cx(th, kpiTh)} title="Calculated: times a reviewer returned the task">
                   Revision Count
                 </th>
-                <th className={th}>Under Review Date</th>
-                <th className={th} title="Time the latest review took, or has taken so far, hours:minutes">
-                  Review Wait Time
+                <th className={cx(th, kpiTh)} title="Calculated: (Editor Committed − Assigned Deadline) ÷ 24 h. Negative = committed early">
+                  Commitment Variance (Days)
                 </th>
-                <th className={th}>Actions</th>
+                <th className={cx(th, kpiTh)} title="Calculated: 1st submission vs the deadline date & time">
+                  SLA Delivery Status
+                </th>
               </tr>
             </thead>
             <tbody>
               {tasks.map((t) => {
                 const r = rights.get(t.id)!;
-                const sla = slaStatus(t, now, TIME_ZONE);
-                const urg = urgencyColumn(t, now, TIME_ZONE);
+                const sla = sheetSla(t, now, TIME_ZONE);
+                const variance = commitmentVarianceDays(t, TIME_ZONE);
                 const selected = params.task === t.id;
                 const stickyBg = selected ? "bg-brand-50" : "bg-white";
                 return (
@@ -254,48 +310,63 @@ export default async function TaskPipelinePage({ searchParams }: { searchParams:
                     </td>
                     <td className={td}>
                       {r.isAssigner ? (
-                        <AutoSubmitSelect action={setPriority} hidden={{ id: t.id }} name="priority" value={t.priority} label={`Priority of ${t.code}`} options={PRIORITIES.map((p) => ({ value: p, label: PRIORITY_LABEL[p] }))} />
+                        <AutoSubmitSelect action={setPriority} hidden={{ id: t.id }} name="priority" value={t.priority} label={`Priority of ${t.code}`} options={PRIORITIES.map((p) => ({ value: p, label: PRIORITY_LABEL[p] }))} tones={PRIORITY_PILL} />
                       ) : (
-                        <Badge tone={PRIORITY_TONE[t.priority]}>{PRIORITY_LABEL[t.priority]}</Badge>
+                        <span className={cx(pill, PRIORITY_PILL[t.priority])}>{PRIORITY_LABEL[t.priority]}</span>
                       )}
                     </td>
-                    <td className={cx(td, "whitespace-nowrap text-slate-600")}>{formatDayIn(t.startDate, TIME_ZONE)}</td>
-                    <td className={cx(td, "whitespace-nowrap text-slate-600")}>{formatDate(t.deadline)}</td>
-                    <td className={cx(td, "whitespace-nowrap text-slate-600")}>{formatDayIn(t.completedDate, TIME_ZONE)}</td>
                     <td className={cx(td, "whitespace-nowrap")}>
-                      <Badge tone={STATUS_TONE[t.status]}>{PIPELINE_STATUS_LABEL[t.status]}</Badge>
+                      <StatusSelect id={t.id} code={t.code} status={t.status} actions={r.actions} blockHref={href({ task: t.id, block: "1" })} />
                     </td>
-                    <td className={cx(td, "text-right whitespace-nowrap text-slate-600 tabular-nums")}>{formatDuration(turnaroundHours(t))}</td>
-                    <td className={cx(td, "max-w-[240px] truncate text-xs text-slate-600 italic")} title={t.notes ?? undefined}>
-                      {t.notes ?? <span className="text-slate-300 not-italic">—</span>}
+                    <td className={cx(td, "whitespace-nowrap text-slate-600")}>
+                      {r.isAssigner ? (
+                        <AutoSubmitDate action={setTaskDates} hidden={{ id: t.id }} name="assignedDate" value={dayIn(t.assignedDate, TIME_ZONE)} label={`Assigned date of ${t.code}`} required />
+                      ) : (
+                        formatDayIn(t.assignedDate, TIME_ZONE)
+                      )}
                     </td>
-                    <td className={cx(td, "whitespace-nowrap")}>{SLA_TONE[sla] ? <Badge tone={SLA_TONE[sla]}>{SLA_LABEL[sla]}</Badge> : <span className="text-slate-400">{SLA_LABEL[sla]}</span>}</td>
-                    <td className={cx(td, "whitespace-nowrap text-slate-600")}>{monthLabel(taskMonth(t, TIME_ZONE))}</td>
-                    <td className={cx(td, "whitespace-nowrap")}>
-                      <Badge tone={urg.tone}>{urg.label}</Badge>
+                    <td className={cx(td, "whitespace-nowrap text-slate-600")}>
+                      {r.isAssigner ? (
+                        <AutoSubmitDate action={setTaskDates} hidden={{ id: t.id }} name="deadline" value={t.deadline ? dateDay(t.deadline) : ""} label={`Deadline of ${t.code}`} />
+                      ) : (
+                        formatDate(t.deadline)
+                      )}
                     </td>
-                    <td className={cx(td, "max-w-[180px] text-xs text-slate-600")}>
-                      {t.blockerType ? t.blockerType.name : <span className="text-slate-400">{t.status === "ON_HOLD" ? "No reason given" : "None"}</span>}
-                      {t.status === "ON_HOLD" && t.clientAction && <div className="text-rose-600">Waiting on client</div>}
+                    <td className={cx(td, "whitespace-nowrap text-slate-600")}>
+                      {r.isAssigner ? <TimeSelect action={setDeadlineTime} id={t.id} name="deadlineTime" value={t.deadlineTime} label={`Deadline time of ${t.code}`} /> : formatTimeSlot(t.deadlineTime)}
                     </td>
-                    <td className={cx(td, "whitespace-nowrap text-slate-600")}>{t.reviewer?.name ?? <span className="text-slate-400">—</span>}</td>
-                    <td className={cx(td, "text-center text-slate-600")}>{t.revisionCount || <span className="text-slate-300">0</span>}</td>
-                    <td className={cx(td, "whitespace-nowrap text-slate-600")}>{formatDayIn(t.underReviewAt, TIME_ZONE)}</td>
-                    <td className={cx(td, "text-right whitespace-nowrap text-slate-600 tabular-nums")}>{formatDuration(reviewWait(t, t.events[0]?.createdAt, now))}</td>
-                    <td className={td}>
-                      <div className="flex flex-wrap gap-1">
-                        {r.actions.map((a) =>
-                          a === "hold" ? (
-                            <LinkButton key={a} href={href({ task: t.id, block: "1" })} variant="secondary" size="sm">
-                              {ACTION_LABEL[a]}
-                            </LinkButton>
-                          ) : (
-                            <InlineAction key={a} action={moveTask} hidden={{ id: t.id, action: a }} variant={PRIMARY.includes(a) ? "primary" : "secondary"}>
-                              {ACTION_LABEL[a]}
-                            </InlineAction>
-                          ),
-                        )}
-                      </div>
+                    <td className={cx(td, "whitespace-nowrap text-slate-600")}>
+                      {r.isAssignee || r.isAssigner ? (
+                        <AutoSubmitDate action={setCommitment} hidden={{ id: t.id }} name="committedDate" value={t.committedDate ? dateDay(t.committedDate) : ""} label={`Editor committed date of ${t.code}`} />
+                      ) : (
+                        formatDate(t.committedDate)
+                      )}
+                    </td>
+                    <td className={cx(td, "whitespace-nowrap text-slate-600")}>
+                      {r.isAssignee || r.isAssigner ? <TimeSelect action={setCommitment} id={t.id} name="committedTime" value={t.committedTime} label={`Editor committed time of ${t.code}`} /> : formatTimeSlot(t.committedTime)}
+                    </td>
+                    <td className={cx(td, "whitespace-nowrap text-slate-600")}>
+                      <PreviewLinkCell key={t.previewLink ?? ""} action={setPreviewLink.bind(null, t.id)} link={t.previewLink} canEdit={r.isAssignee || r.isAssigner || t.reviewerId === user.id} />
+                    </td>
+                    <td className={cx(td, "whitespace-nowrap text-slate-600")}>
+                      {r.isAssignee || r.isAssigner ? (
+                        <AutoSubmitDate action={setFirstSubmission} hidden={{ id: t.id }} name="firstSubmittedDate" value={t.firstSubmittedDate ? dateDay(t.firstSubmittedDate) : ""} label={`1st submission date of ${t.code}`} />
+                      ) : (
+                        formatDate(t.firstSubmittedDate)
+                      )}
+                    </td>
+                    <td className={cx(td, "whitespace-nowrap text-slate-600")}>
+                      {r.isAssignee || r.isAssigner ? <TimeSelect action={setFirstSubmission} id={t.id} name="firstSubmittedTime" value={t.firstSubmittedTime} label={`1st submission time of ${t.code}`} /> : formatTimeSlot(t.firstSubmittedTime)}
+                    </td>
+                    <td className={cx(td, "text-xs text-slate-600 italic")}>
+                      <NotesCell key={t.notes ?? ""} action={updateNotes.bind(null, t.id)} notes={t.notes} canEdit={r.isAssignee || r.isAssigner || t.reviewerId === user.id} />
+                    </td>
+                    <td className={cx(td, kpiTd, "text-right")}>{formatHoursDecimal(netTurnaroundHours(t, TIME_ZONE))}</td>
+                    <td className={cx(td, kpiTd, "text-right")}>{formatHoursDecimal(totalReviewWaitHours(t.events, now))}</td>
+                    <td className={cx(td, kpiTd, "text-right")}>{t.revisionCount}</td>
+                    <td className={cx(td, kpiTd, "text-right font-semibold", variance == null ? "text-slate-300" : variance > 0 ? "text-red-700" : "text-green-700")}>{formatVariance(variance)}</td>
+                    <td className={cx(td, kpiTd, "text-center")}>
+                      {SLA_PILL[sla] ? <span className={cx(pill, "font-semibold", SLA_PILL[sla])}>{SHEET_SLA_LABEL[sla]}</span> : <span className="text-slate-400">{SHEET_SLA_LABEL[sla]}</span>}
                     </td>
                   </tr>
                 );
@@ -342,9 +413,9 @@ async function TaskDrawer({
   const now = new Date();
   const r = await rightsFor(user, t);
   const urg = urgency(t, now, TIME_ZONE);
-  const sla = slaStatus(t, now, TIME_ZONE);
+  const sla = sheetSla(t, now, TIME_ZONE);
   const logged = t.timeEntries.reduce((s, e) => s + Number(e.hours), 0);
-  const wait = reviewWait(t, t.events.find((e) => e.action === "approve" || e.action === "reject")?.createdAt, now);
+  const wait = totalReviewWaitHours(t.events, now); // the panel loads the latest 50 events, plenty for a task's review rounds
   const canEditBlocker = t.status === "ON_HOLD" && (r.isAssignee || r.isAssigner);
   const canEditNotes = r.isAssignee || r.isAssigner || t.reviewerId === user.id;
   const blocking = blockMode && r.actions.includes("hold"); // the block form replaces the buttons until submitted
@@ -374,8 +445,8 @@ async function TaskDrawer({
           </Link>
         </div>
         <div className="mt-2 flex flex-wrap gap-1.5">
-          <Badge tone={STATUS_TONE[t.status]}>{PIPELINE_STATUS_LABEL[t.status]}</Badge>
-          <Badge tone={PRIORITY_TONE[t.priority]}>{PRIORITY_LABEL[t.priority]} priority</Badge>
+          <span className={cx(pill, STATUS_PILL[t.status])}>{PIPELINE_STATUS_LABEL[t.status]}</span>
+          <span className={cx(pill, PRIORITY_PILL[t.priority])}>{PRIORITY_LABEL[t.priority]} priority</span>
           {urg && <Badge tone={urg.tone}>{urg.label}</Badge>}
           {!urg && (sla === "ON_TIME" || sla === "LATE") && <Badge tone={sla === "ON_TIME" ? "green" : "amber"}>{sla === "ON_TIME" ? "Delivered on time" : "Late completion"}</Badge>}
         </div>
@@ -454,9 +525,9 @@ async function TaskDrawer({
           {fact(
             "Priority",
             r.isAssigner ? (
-              <AutoSubmitSelect action={setPriority} hidden={{ id: t.id }} name="priority" value={t.priority} label="Priority" className="mt-0.5 w-full py-1 text-sm" options={PRIORITIES.map((p) => ({ value: p, label: PRIORITY_LABEL[p] }))} />
+              <AutoSubmitSelect action={setPriority} hidden={{ id: t.id }} name="priority" value={t.priority} label="Priority" options={PRIORITIES.map((p) => ({ value: p, label: PRIORITY_LABEL[p] }))} tones={PRIORITY_PILL} />
             ) : (
-              PRIORITY_LABEL[t.priority]
+              <span className={cx(pill, PRIORITY_PILL[t.priority])}>{PRIORITY_LABEL[t.priority]}</span>
             ),
           )}
           {fact("Assigned", formatDayIn(t.assignedDate, TIME_ZONE))}
@@ -467,7 +538,9 @@ async function TaskDrawer({
           {fact("Time logged", formatHours(logged))}
           {fact("Month", monthLabel(taskMonth(t, TIME_ZONE)))}
           {fact("Under review since", formatDayIn(t.underReviewAt, TIME_ZONE))}
-          {fact("Review wait time", formatDuration(wait))}
+          {fact("Net turnaround", formatHoursDecimal(netTurnaroundHours(t, TIME_ZONE)))}
+          {fact("Review wait time", formatHoursDecimal(wait))}
+          {fact("Commitment variance (days)", formatVariance(commitmentVarianceDays(t, TIME_ZONE)))}
           {fact("Reviews · revisions · reopens", `${t.reviewCount} · ${t.revisionCount} · ${t.reopenCount}`)}
         </dl>
 

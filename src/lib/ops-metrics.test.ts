@@ -1,11 +1,68 @@
 import { describe, expect, it } from "vitest";
-import { completionPct, formatDuration, normaliseBlockerName, pipelineSummary, reviewWait, reviewWaitHours, slaStatus, taskMonth, turnaroundHours, urgency, urgencyColumn, workflowEffects, type MetricTask } from "./ops-metrics";
+import {
+  commitmentVarianceDays,
+  completionPct,
+  formatDuration,
+  formatHoursDecimal,
+  formatVariance,
+  netTurnaroundHours,
+  normaliseBlockerName,
+  pipelineSummary,
+  reviewWait,
+  reviewWaitHours,
+  sheetSla,
+  slaStatus,
+  taskMonth,
+  totalReviewWaitHours,
+  turnaroundHours,
+  urgency,
+  urgencyColumn,
+  workflowEffects,
+  type MetricTask,
+  type SheetTask,
+} from "./ops-metrics";
+import type { TaskStatus } from "./tasks";
 
 const tz = "Asia/Kolkata";
 const day = (s: string) => new Date(`${s}T00:00:00Z`); // date-only values are stored at UTC midnight
 const at = (s: string) => new Date(s);
 const now = at("2026-10-25T10:00:00+05:30");
 const task = (o: Partial<MetricTask>): MetricTask => ({ status: "IN_PROGRESS", deadline: day("2026-10-25"), completedDate: null, assignedDate: at("2026-10-20T09:00:00+05:30"), ...o });
+
+describe("sheet KPI columns (Creatives Task Tracker examples)", () => {
+  const sheetNow = at("2026-11-02T12:00:00+05:30");
+  const tsk1 = task({ status: "COMPLETED", assignedDate: at("2026-10-31T00:00:00+05:30"), deadline: day("2026-11-01"), deadlineTime: "15:00", committedDate: day("2026-10-31"), committedTime: "21:00", firstSubmittedDate: day("2026-11-01"), firstSubmittedTime: "09:00" } as Partial<SheetTask>) as SheetTask;
+  const tsk2 = task({ status: "PENDING_APPROVAL", assignedDate: at("2026-10-31T00:00:00+05:30"), deadline: day("2026-11-01"), deadlineTime: "18:00" } as Partial<SheetTask>) as SheetTask;
+  const tsk3 = task({ status: "COMPLETED", assignedDate: at("2026-11-01T00:00:00+05:30"), deadline: day("2026-11-02"), deadlineTime: "03:30", committedDate: day("2026-11-02"), committedTime: "05:00", firstSubmittedDate: day("2026-11-02"), firstSubmittedTime: "06:00" } as Partial<SheetTask>) as SheetTask;
+
+  it("Net Turnaround = 1st submission − assigned", () => {
+    expect(formatHoursDecimal(netTurnaroundHours(tsk1, tz))).toBe("33.0h");
+    expect(formatHoursDecimal(netTurnaroundHours(tsk3, tz))).toBe("30.0h");
+  });
+  it("Commitment Variance = (committed − deadline) / 24 h, signed", () => {
+    expect(formatVariance(commitmentVarianceDays(tsk1, tz))).toBe("-0.75");
+    expect(formatVariance(commitmentVarianceDays(tsk3, tz))).toBe("+0.06");
+    expect(commitmentVarianceDays(tsk2, tz)).toBeNull();
+  });
+  it("SLA compares the 1st submission with the deadline date & time", () => {
+    expect(sheetSla(tsk1, sheetNow, tz)).toBe("ON_TIME");
+    expect(sheetSla(tsk2, sheetNow, tz)).toBe("OVERDUE");
+    expect(sheetSla(tsk3, sheetNow, tz)).toBe("LATE");
+    expect(sheetSla({ ...tsk2, deadlineTime: null, deadline: day("2026-11-02") }, sheetNow, tz)).toBe("OPEN"); // no time: due at end of day
+  });
+  it("Review Wait adds up every stretch Under review", () => {
+    const ev = (s: string, fromStatus: TaskStatus, toStatus: TaskStatus) => ({ createdAt: at(s), fromStatus, toStatus });
+    const events = [
+      ev("2026-11-01T09:00:00+05:30", "IN_PROGRESS", "PENDING_APPROVAL"),
+      ev("2026-11-01T12:00:00+05:30", "PENDING_APPROVAL", "REJECTED"),
+      ev("2026-11-01T15:00:00+05:30", "IN_PROGRESS", "PENDING_APPROVAL"),
+      ev("2026-11-01T17:00:00+05:30", "PENDING_APPROVAL", "COMPLETED"),
+    ];
+    expect(totalReviewWaitHours(events, sheetNow)).toBe(5);
+    expect(totalReviewWaitHours(events.slice(0, 3), at("2026-11-01T16:00:00+05:30"))).toBe(4); // still waiting
+    expect(totalReviewWaitHours([], sheetNow)).toBeNull();
+  });
+});
 
 describe("SLA status", () => {
   it("is on time when finished on the due day (in IST), a late completion when finished after it", () => {
@@ -117,6 +174,11 @@ describe("workflow effects", () => {
     expect(workflowEffects("approve", { status: "PENDING_APPROVAL", startDate: t0 }, "COMPLETED", t0)).toEqual({ reviewCount: { increment: 1 } });
     expect(workflowEffects("reject", { status: "PENDING_APPROVAL", startDate: t0 }, "REJECTED", t0)).toEqual({ revisionCount: { increment: 1 } });
     expect(workflowEffects("revert", { status: "COMPLETED", startDate: t0 }, "IN_PROGRESS", t0)).toEqual({ reopenCount: { increment: 1 } });
+  });
+  it("stamps the 1st submission on the first Complete only, as an IST day and half-hour slot", () => {
+    const late = at("2026-10-25T23:47:00+05:30");
+    expect(workflowEffects("complete", { status: "IN_PROGRESS", startDate: t0 }, "PENDING_APPROVAL", late, tz)).toEqual({ underReviewAt: late, firstSubmittedDate: day("2026-10-25"), firstSubmittedTime: "23:30" });
+    expect(workflowEffects("complete", { status: "REJECTED", startDate: t0, firstSubmittedDate: day("2026-10-20") }, "PENDING_APPROVAL", late, tz)).toEqual({ underReviewAt: late });
   });
   it("keeps the blocker category and note when a task leaves On Hold, clearing only the client's to-do", () => {
     expect(workflowEffects("resume", { status: "ON_HOLD", startDate: t0 }, "IN_PROGRESS", t0)).toEqual({ clientAction: null });

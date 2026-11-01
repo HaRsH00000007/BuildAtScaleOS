@@ -49,7 +49,15 @@ export function formatDayIn(d: Date | null | undefined, timeZone: string): strin
   const [y, m, day] = dayIn(d, timeZone).split("-");
   return `${day}-${m}-${y}`;
 }
-const daysBetween = (from: string, to: string) => Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
+/** Half-hour slots "00:00"…"23:30" for the sheet's time columns (deadline time, editor committed time). */
+export const TIME_SLOTS = Array.from({ length: 48 }, (_, i) => `${String(Math.floor(i / 2)).padStart(2, "0")}:${i % 2 ? "30" : "00"}`);
+/** "18:00" → "6:00 PM"; empty → "—". */
+export function formatTimeSlot(hhmm: string | null | undefined): string {
+  if (!hhmm) return "—";
+  const [h, m] = hhmm.split(":").map(Number);
+  return `${h % 12 || 12}:${String(m).padStart(2, "0")} ${h < 12 ? "AM" : "PM"}`;
+}
+const daysBetween =(from: string, to: string) => Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
 
 /** Work is handed in once the assignee completes it (Under review or Completed). */
 export const isFinished = (t: Pick<MetricTask, "status" | "completedDate">) => (t.status === "COMPLETED" || t.status === "PENDING_APPROVAL") && !!t.completedDate;
@@ -133,6 +141,87 @@ export function reviewWait(t: { status: TaskStatus; underReviewAt?: Date | null 
   return reviewWaitHours(t.underReviewAt, t.status === "PENDING_APPROVAL" ? undefined : decided, now);
 }
 
+// ── The Creatives Task Tracker's red KPI columns (formula-driven, never typed in) ──────────────────────────────────
+// The sheet keeps dates and times in separate columns. A date with no time counts as the end of that day (A).
+
+/** Minutes the time zone is ahead of UTC at instant d. */
+function zoneOffsetMinutes(d: Date, timeZone: string): number {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).formatToParts(d).map((x) => [x.type, x.value]));
+  return (Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute) - Math.floor(d.getTime() / 60000) * 60000) / 60000;
+}
+
+/** A sheet date (calendar date, stored at UTC midnight) plus an optional "HH:MM" in the org's time zone, as an instant. */
+export function sheetInstant(date: Date | null | undefined, time: string | null | undefined, timeZone: string): Date | null {
+  if (!date) return null;
+  const [h, m] = time ? time.split(":").map(Number) : [24, 0];
+  const wall = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), h, m);
+  return new Date(wall - zoneOffsetMinutes(new Date(wall), timeZone) * 60000);
+}
+
+export type SheetTask = MetricTask & {
+  deadlineTime?: string | null;
+  committedDate?: Date | null;
+  committedTime?: string | null;
+  firstSubmittedDate?: Date | null;
+  firstSubmittedTime?: string | null;
+};
+
+/** 1st Submission Date & Time; tasks finished before the column existed fall back to their completion time (A). */
+export function firstSubmissionAt(t: SheetTask, timeZone: string): Date | null {
+  return sheetInstant(t.firstSubmittedDate, t.firstSubmittedTime, timeZone) ?? (isFinished(t) ? t.completedDate : null);
+}
+
+/** Net Turnaround (Hrs) = 1st Submission Date & Time − Assigned Date & Time. */
+export function netTurnaroundHours(t: SheetTask, timeZone: string): number | null {
+  const sub = firstSubmissionAt(t, timeZone);
+  return sub ? hoursBetween(t.assignedDate, sub) : null;
+}
+
+/** Review Wait Time (Hrs): every stretch the task spent Under review, added up (the open one runs to now). */
+export function totalReviewWaitHours(events: { createdAt: Date; fromStatus: TaskStatus | null; toStatus: TaskStatus | null }[], now: Date): number | null {
+  let total = 0;
+  let since: Date | null = null;
+  let reviewed = false;
+  for (const e of [...events].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())) {
+    if (since && e.fromStatus === "PENDING_APPROVAL") {
+      total += hoursBetween(since, e.createdAt);
+      since = null;
+    }
+    if (e.toStatus === "PENDING_APPROVAL") {
+      since = e.createdAt;
+      reviewed = true;
+    }
+  }
+  if (since) total += hoursBetween(since, now);
+  return reviewed ? total : null;
+}
+
+/** Commitment Variance (Days) = (Editor Committed Date & Time − Assigned Deadline Date & Time) / 24 h. Negative = early. */
+export function commitmentVarianceDays(t: SheetTask, timeZone: string): number | null {
+  const committed = sheetInstant(t.committedDate, t.committedTime, timeZone);
+  const due = sheetInstant(t.deadline, t.deadlineTime, timeZone);
+  if (!committed || !due) return null;
+  return (committed.getTime() - due.getTime()) / 86_400_000;
+}
+
+/**
+ * The sheet's SLA Delivery Status: On Time if the 1st submission came by the deadline (date & time), Late Completion
+ * if after it, Overdue if the deadline passed with no submission yet. Open = not yet due.
+ */
+export function sheetSla(t: SheetTask, now: Date, timeZone: string): Sla {
+  if (t.status === "DECLINED") return "NOT_COUNTED";
+  const due = sheetInstant(t.deadline, t.deadlineTime, timeZone);
+  if (!due) return "NO_DUE_DATE";
+  const sub = firstSubmissionAt(t, timeZone);
+  if (sub) return sub <= due ? "ON_TIME" : "LATE";
+  return now > due ? "OVERDUE" : "OPEN";
+}
+
+/** 33 → "33.0h". */
+export const formatHoursDecimal = (h: number | null | undefined) => (h == null ? "—" : `${h.toFixed(1)}h`);
+/** -0.75 → "-0.75", 0.0625 → "+0.06". */
+export const formatVariance = (d: number | null | undefined) => (d == null ? "—" : `${d > 0 ? "+" : ""}${d.toFixed(2)}`);
+
 export type PipelineSummary = {
   total: number;
   byStatus: Record<TaskStatus, number>;
@@ -165,17 +254,27 @@ export function completionPct(tasks: Pick<MetricTask, "status">[]): number | nul
   return counted.length ? (counted.filter((t) => t.status === "COMPLETED").length / counted.length) * 100 : null;
 }
 
-export type WorkflowState = { status: TaskStatus; startDate: Date | null; completedDate?: Date | null };
+export type WorkflowState = { status: TaskStatus; startDate: Date | null; completedDate?: Date | null; firstSubmittedDate?: Date | null };
+
+/** An instant as the sheet's date + half-hour time slot in the org's time zone (time rounded down to the slot). */
+export function slotIn(d: Date, timeZone: string): { date: Date; time: string } {
+  const hm = new Intl.DateTimeFormat("en-GB", { timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(d);
+  const [h, m] = hm.split(":");
+  return { date: new Date(`${dayIn(d, timeZone)}T00:00:00Z`), time: `${h}:${Number(m) < 30 ? "00" : "30"}` };
+}
 
 /**
  * Extra Ops Tracker fields a workflow action updates, on top of the status change My Tasks already makes (A).
  * Start/resume stamp the first start; entering review stamps underReviewAt; approve counts a review; reject counts a
  * revision; revert (reopen) counts a reopen. Leaving On Hold keeps the blocker category and note, as the sheet does, so
- * finished tasks still show what held them up; only the client's to-do is cleared.
+ * finished tasks still show what held them up; only the client's to-do is cleared. The first Complete stamps the
+ * sheet's 1st Submission Date/Time (in timeZone) unless one is already set.
  */
-export function workflowEffects(action: string, before: WorkflowState, after: TaskStatus, now: Date) {
+export function workflowEffects(action: string, before: WorkflowState, after: TaskStatus, now: Date, timeZone?: string) {
   const data: {
     startDate?: Date;
+    firstSubmittedDate?: Date;
+    firstSubmittedTime?: string;
     underReviewAt?: Date | null;
     reviewCount?: { increment: number };
     revisionCount?: { increment: number };
@@ -184,6 +283,11 @@ export function workflowEffects(action: string, before: WorkflowState, after: Ta
   } = {};
   if (after === "IN_PROGRESS" && !before.startDate) data.startDate = now;
   if (after === "PENDING_APPROVAL") data.underReviewAt = now;
+  if (action === "complete" && timeZone && !before.firstSubmittedDate) {
+    const slot = slotIn(now, timeZone);
+    data.firstSubmittedDate = slot.date;
+    data.firstSubmittedTime = slot.time;
+  }
   if (action === "approve") data.reviewCount = { increment: 1 };
   if (action === "reject") data.revisionCount = { increment: 1 };
   if (action === "revert") data.reopenCount = { increment: 1 };

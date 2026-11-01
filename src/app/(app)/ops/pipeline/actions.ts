@@ -6,7 +6,8 @@ import { assertPermission, AuthorizationError } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { formObject, fromZod, toActionError, type ActionState } from "@/lib/actions";
 import { resolveBlockerType } from "@/lib/blocker-types";
-import { BLOCKER_NAME_MAX, NEW_BLOCKER, normaliseBlockerName, PRIORITIES, PRIORITY_LABEL } from "@/lib/ops-metrics";
+import { BLOCKER_NAME_MAX, NEW_BLOCKER, normaliseBlockerName, dayIn, PRIORITIES, PRIORITY_LABEL, TIME_SLOTS } from "@/lib/ops-metrics";
+import { TIME_ZONE } from "@/lib/org";
 import { isTaskAssigner } from "@/lib/task-access";
 import { runTaskAction } from "@/lib/task-workflow";
 import type { TaskAction } from "@/lib/tasks";
@@ -110,6 +111,91 @@ export async function setPriority(formData: FormData) {
   if (task.priority === priority) return;
   await db.task.update({ where: { id: task.id }, data: { priority, events: { create: { userId: user.id, kind: "PRIORITY", note: `${PRIORITY_LABEL[task.priority]} → ${PRIORITY_LABEL[priority]}` } } } });
   refresh();
+}
+
+const timeSlot = z.union([z.literal(""), z.enum(TIME_SLOTS as [string, ...string[]])]);
+
+/** The sheet's "Assigned Deadline (time)". An assigner right, like the deadline itself. */
+export async function setDeadlineTime(formData: FormData) {
+  const user = await assertPermission("ops.view");
+  const time = timeSlot.parse(formData.get("deadlineTime") ?? "");
+  const task = await db.task.findUniqueOrThrow({ where: { id: String(formData.get("id")) } });
+  if (!(await isTaskAssigner(user, task))) throw new AuthorizationError("Only whoever assigned the task or a project manager can change its deadline");
+  await db.task.update({ where: { id: task.id }, data: { deadlineTime: time || null } });
+  refresh();
+}
+
+const dayField = z.union([z.literal(""), z.string().regex(/^\d{4}-\d{2}-\d{2}$/)]);
+
+/** The sheet's "Assigned Date" and "Assigned Deadline (date)", picked from a calendar. Assigner rights. One field per submit. */
+export async function setTaskDates(formData: FormData) {
+  const user = await assertPermission("ops.view");
+  const task = await db.task.findUniqueOrThrow({ where: { id: String(formData.get("id")) } });
+  if (!(await isTaskAssigner(user, task))) throw new AuthorizationError("Only whoever assigned the task or a project manager can change its dates");
+  const data: { assignedDate?: Date; deadline?: Date | null } = {};
+  if (formData.has("assignedDate")) {
+    const day = dayField.parse(formData.get("assignedDate"));
+    if (!day) throw new AuthorizationError("A task needs an assigned date");
+    // assignedDate is an instant; midday UTC lands on the picked calendar day in the org's time zone (IST).
+    if (dayIn(task.assignedDate, TIME_ZONE) !== day) data.assignedDate = new Date(`${day}T12:00:00Z`);
+  }
+  if (formData.has("deadline")) {
+    const day = dayField.parse(formData.get("deadline"));
+    data.deadline = day ? new Date(`${day}T00:00:00Z`) : null; // calendar date, like elsewhere
+  }
+  if (!Object.keys(data).length) return;
+  await db.task.update({ where: { id: task.id }, data });
+  refresh();
+  revalidatePath("/ops/overview");
+}
+
+/** The sheet's "Editor Committed Date / Time": when the editor promises delivery. The assignee or an assigner sets it (A).
+ * Each field saves on its own, so the form carries only the one that changed. */
+export async function setCommitment(formData: FormData) {
+  const user = await assertPermission("ops.view");
+  const task = await db.task.findUniqueOrThrow({ where: { id: String(formData.get("id")) } });
+  if (task.assigneeId !== user.id && !(await isTaskAssigner(user, task))) throw new AuthorizationError("Only the assignee or whoever assigned the task can set the committed date");
+  const data: { committedDate?: Date | null; committedTime?: string | null } = {};
+  if (formData.has("committedDate")) {
+    const day = dayField.parse(formData.get("committedDate"));
+    data.committedDate = day ? new Date(`${day}T00:00:00Z`) : null;
+  }
+  if (formData.has("committedTime")) data.committedTime = timeSlot.parse(formData.get("committedTime")) || null;
+  await db.task.update({ where: { id: task.id }, data });
+  refresh();
+}
+
+/** The sheet's "1st Submission Date / Time". Stamped by the first Complete; the assignee or an assigner can correct it (A). */
+export async function setFirstSubmission(formData: FormData) {
+  const user = await assertPermission("ops.view");
+  const task = await db.task.findUniqueOrThrow({ where: { id: String(formData.get("id")) } });
+  if (task.assigneeId !== user.id && !(await isTaskAssigner(user, task))) throw new AuthorizationError("Only the assignee or whoever assigned the task can change the submission date");
+  const data: { firstSubmittedDate?: Date | null; firstSubmittedTime?: string | null } = {};
+  if (formData.has("firstSubmittedDate")) {
+    const day = dayField.parse(formData.get("firstSubmittedDate"));
+    data.firstSubmittedDate = day ? new Date(`${day}T00:00:00Z`) : null;
+  }
+  if (formData.has("firstSubmittedTime")) data.firstSubmittedTime = timeSlot.parse(formData.get("firstSubmittedTime")) || null;
+  await db.task.update({ where: { id: task.id }, data });
+  refresh();
+}
+
+const previewLink = z.union([z.literal(""), z.string().trim().url("Enter a full link, starting with https://").max(2000)]);
+
+/** The sheet's "Preview Link". The assignee, the reviewer or whoever assigned the task can set it (A). */
+export async function setPreviewLink(taskId: string, _: ActionState, formData: FormData): Promise<ActionState> {
+  try {
+    const user = await assertPermission("ops.view");
+    const task = await db.task.findUniqueOrThrow({ where: { id: taskId } });
+    if (task.assigneeId !== user.id && task.reviewerId !== user.id && !(await isTaskAssigner(user, task))) throw new AuthorizationError("Only the assignee, the reviewer or whoever assigned the task can change the preview link");
+    const parsed = previewLink.safeParse(String(formData.get("previewLink") ?? "").trim());
+    if (!parsed.success) return { error: parsed.error.issues[0].message };
+    await db.task.update({ where: { id: task.id }, data: { previewLink: parsed.data || null } });
+  } catch (err) {
+    return toActionError(err);
+  }
+  refresh();
+  return {};
 }
 
 export async function setReviewer(formData: FormData) {

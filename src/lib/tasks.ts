@@ -51,6 +51,9 @@ export function allowedActions(status: TaskStatus, ctx: TaskActorContext): TaskA
   return (Object.keys(TRANSITIONS) as TaskAction[]).filter((a) => TRANSITIONS[a].from.includes(status) && permitted(TRANSITIONS[a].by, ctx));
 }
 
+/** The status an action moves a task to. */
+export const actionTarget = (action: TaskAction): TaskStatus => TRANSITIONS[action].to;
+
 export function allowedCommands(status: TaskStatus, ctx: TaskActorContext): TaskCommand[] {
   return [...allowedActions(status, ctx), ...(ctx.isAssigner ? ASSIGNER_COMMANDS[status] : [])];
 }
