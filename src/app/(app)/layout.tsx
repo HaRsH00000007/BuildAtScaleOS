@@ -1,7 +1,8 @@
 import { Sidebar } from "@/components/sidebar";
 import { Avatar } from "@/components/ui";
 import { requireUser } from "@/lib/auth";
-import { visibleNav } from "@/lib/nav";
+import { PIPELINE_HOME, pipelineOnly } from "@/lib/deploy";
+import { NAV, visibleNav } from "@/lib/nav";
 import { getOrgSettings } from "@/lib/org";
 import { logout } from "../login/actions";
 
@@ -10,7 +11,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const org = await getOrgSettings();
   return (
     <div className="flex h-screen">
-      <Sidebar items={visibleNav(user.permissions)} orgName={org.name} />
+      <Sidebar items={visibleNav(user.permissions, pipelineOnly() ? NAV.filter((i) => i.href === PIPELINE_HOME) : NAV)} orgName={org.name} />
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-end gap-3 border-b border-ink-800 bg-ink px-6 py-3 text-white">
           <div className="text-right">

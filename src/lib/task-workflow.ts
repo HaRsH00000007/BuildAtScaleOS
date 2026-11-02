@@ -2,7 +2,7 @@ import "server-only";
 import { AuthorizationError, type CurrentUser } from "./auth";
 import { db } from "./db";
 import { workflowEffects } from "./ops-metrics";
-import { getOrgSettings } from "./org";
+import { getOrgSettings, TIME_ZONE } from "./org";
 import { isTaskAssigner } from "./task-access";
 import { applyAction, completionStatus, elapsedHours, TIMER_STARTS, TIMER_STOPS, type TaskAction } from "./tasks";
 
@@ -54,7 +54,7 @@ export async function runTaskAction(user: CurrentUser, taskId: string, action: T
         // "Completed" date is when the assignee finished (shown on Pending Approval cards in the demo).
         completedDate: action === "complete" ? now : action === "revert" || action === "reject" ? null : task.completedDate,
         startedAt: TIMER_STARTS.includes(action) ? now : TIMER_STOPS.includes(action) ? null : task.startedAt,
-        ...workflowEffects(action, task, status, now),
+        ...workflowEffects(action, task, status, now, TIME_ZONE),
         ...(status === "ON_HOLD" && blocker ? { blockerTypeId: blocker.blockerTypeId, blockerNote: blocker.blockerNote ?? null, clientAction: blocker.clientAction ?? null } : {}),
       },
     });

@@ -9,7 +9,9 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+  url       = env("DATABASE_URL")
+  // Migrations need a direct connection; on Supabase DATABASE_URL is the pooled one (port 6543). Locally both are the same.
+  directUrl = env("DIRECT_URL")
 }
 
 // ---------- Access control ----------
@@ -254,6 +256,12 @@ model Task {
   priority       Priority     @default(NORMAL)
   assignedDate   DateTime     @default(now())
   deadline       DateTime?
+  deadlineTime   String? // the sheet's "Assigned Deadline (time)", "HH:MM" in the org's time zone; deadline stays a calendar date
+  committedDate  DateTime? // the sheet's "Editor Committed Date": the day the editor promises delivery (calendar date, UTC midnight)
+  committedTime  String? // the sheet's "Editor Committed Time", "HH:MM"
+  previewLink    String? // the sheet's "Preview Link": where the work can be seen
+  firstSubmittedDate DateTime? // the sheet's "1st Submission Date" (calendar date); stamped on the first Complete, editable
+  firstSubmittedTime String? // the sheet's "1st Submission Time", "HH:MM"
   completedDate  DateTime?
   startedAt      DateTime? // running timer while In Progress; stints are saved as TimeEntry rows
   estimatedHours Decimal?     @db.Decimal(8, 2)
