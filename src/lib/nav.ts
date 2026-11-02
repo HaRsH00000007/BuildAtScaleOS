@@ -18,6 +18,17 @@ export const NAV: NavItem[] = [
   { label: "Settings", href: "/settings", perm: "settings.manage" },
 ];
 
+// Sidebar of a pipeline-only deployment. Everyone can open some project in the full app, but here Projects is for the
+// people who run them, so employees see only the Task Pipeline.
+export const PIPELINE_ONLY_NAV: NavItem[] = [
+  { label: "Task Pipeline", href: "/ops/pipeline", perm: "ops.view" },
+  { label: "Projects", href: "/projects", perm: "projects.manage", section: "Admin" },
+  { label: "People", href: "/people", perm: "people.manage" },
+  { label: "Departments", href: "/departments", perm: "people.manage" },
+  { label: "Clients", href: "/clients", perm: "clients.manage" },
+  { label: "Settings", href: "/settings", perm: "settings.manage" },
+];
+
 /** Items the user may open. */
 export function visibleNav(permissions: readonly string[], items: NavItem[] = NAV): NavItem[] {
   const visible = items.filter((i) => !i.perm || permissions.includes(i.perm));

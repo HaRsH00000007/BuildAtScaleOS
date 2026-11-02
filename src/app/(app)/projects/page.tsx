@@ -1,12 +1,14 @@
 import { redirect } from "next/navigation";
 import { EmptyState, LinkButton } from "@/components/ui";
 import { can, requireUser } from "@/lib/auth";
+import { PIPELINE_HOME, pipelineOnly } from "@/lib/deploy";
 import { readParams, withParams, type SearchParams } from "@/lib/url";
 import { navigatorProjects, navParams, ProjectNavigator, readNavigator } from "./navigator";
 
 // Projects opens on the first project in the list, as in Harmony. The cross-project table lives in Ops › Portfolio.
 export default async function ProjectsPage({ searchParams }: { searchParams: SearchParams }) {
   const user = await requireUser();
+  if (pipelineOnly() && !can(user, "projects.manage")) redirect(PIPELINE_HOME);
   const params = await readParams(searchParams);
   const n = readNavigator(params);
   if (n.view === "projects") {

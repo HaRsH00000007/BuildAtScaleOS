@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 import { assertPermission, AuthorizationError, can, getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { pipelineOnly } from "@/lib/deploy";
 import { formObject, fromZod, toActionError, type ActionState } from "@/lib/actions";
 import { parseAmount } from "@/lib/finance";
 import { canManageProject } from "@/lib/projects";
@@ -105,7 +106,8 @@ export async function createProject(_: ActionState, formData: FormData): Promise
     return toActionError(err);
   }
   revalidateProjects();
-  redirect(`/projects/${id}`);
+  // Pipeline-only deployments have no project pages: carry on to the task this project was created for.
+  redirect(pipelineOnly() ? `/my-tasks/new?projectId=${id}` : `/projects/${id}`);
 }
 
 export async function updateProject(id: string, _: ActionState, formData: FormData): Promise<ActionState> {

@@ -1,10 +1,11 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { InlineAction } from "@/components/forms";
 import { MonthPicker } from "@/components/month-picker";
 import { Avatar, cx } from "@/components/ui";
-import { requireUser } from "@/lib/auth";
+import { can, requireUser } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { PIPELINE_HOME, pipelineOnly } from "@/lib/deploy";
 import { computeFinancials, formatINR, isMonthScoped } from "@/lib/finance";
 import { formatDate, formatPct, monthLabel } from "@/lib/format";
 import { BILLING_LABEL } from "@/lib/labels";
@@ -21,6 +22,7 @@ import { WorkstreamDialog, WorkstreamIntro } from "../workspace-forms";
 
 export default async function ProjectWorkspacePage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: SearchParams }) {
   const user = await requireUser();
+  if (pipelineOnly() && !can(user, "projects.manage")) redirect(PIPELINE_HOME);
   const { id } = await params;
   const sp = await readParams(searchParams);
   if (!(await canViewProject(user, id))) notFound();
